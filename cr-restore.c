@@ -317,24 +317,35 @@ static int map_private_vma(struct vma_area *vma, void **tgt_addr,
 	}
 
 	size = vma_entry_len(vma->e);
+
 	if (paddr == NULL) {
 		/*
 		 * The respective memory area was NOT found in the parent.
 		 * Map a new one.
 		 */
 		pr_info("Map 0x%016"PRIx64"-0x%016"PRIx64" 0x%016"PRIx64" vma\n",
-			vma->e->start, vma->e->end, vma->e->pgoff);
+		        vma->e->start, vma->e->end, vma->e->pgoff);
 
 		addr = mmap(*tgt_addr, size,
-				vma->e->prot | PROT_WRITE,
-				vma->e->flags | MAP_FIXED,
-				vma->e->fd, vma->e->pgoff);
+		            vma->e->prot | PROT_WRITE,
+		            vma->e->flags | MAP_FIXED,
+		            vma->e->fd, vma->e->pgoff);
 
 		if (addr == MAP_FAILED) {
 			pr_perror("Unable to map ANON_VMA");
 			return -1;
 		}
 
+#ifdef DO_REGIONS
+		struct entry_node *entry = xmalloc(sizeof(*entry));
+		memcpy(&entry->e, vma->e, sizeof(entry->e));
+		entry->e.start = (unsigned long)*tgt_addr;
+		entry->e.end = (unsigned long) (*tgt_addr + size);
+		list_add(&entry->list, &vma->entries.list);
+#endif
+		vma->step_on_my_face = !(vma->e->flags & MAP_GROWSDOWN);
+		/* seems file mapping GROWSDOWN pages doesn't work? Sorry stack */
+		
 		*pvma = p;
 	} else {
 		/*
@@ -354,10 +365,12 @@ static int map_private_vma(struct vma_area *vma, void **tgt_addr,
 	}
 
 	vma->premmaped_addr = (unsigned long) addr;
+	/*
 	pr_debug("\tpremap 0x%016"PRIx64"-0x%016"PRIx64" -> %016lx\n",
 		vma->e->start, vma->e->end, (unsigned long)addr);
+	*/
 
-	if (vma->e->flags & MAP_GROWSDOWN) { /* Skip gurad page */
+	if (vma->e->flags & MAP_GROWSDOWN) { /* Skip guard page */
 		vma->e->start += PAGE_SIZE;
 		vma->premmaped_addr += PAGE_SIZE;
 	}
@@ -365,9 +378,15 @@ static int map_private_vma(struct vma_area *vma, void **tgt_addr,
 	if (vma_area_is(vma, VMA_FILE_PRIVATE))
 		close(vma->e->fd);
 
+	/*
+	pr_info("in premap section, for page %lx %lx %lx %lx %lx %lx %lx\n",
+	        vma->premmaped_addr, vma->e->start, vma->e->end, (unsigned long)vma->e->prot, (unsigned long)vma->e->flags, (unsigned long)vma->e->fd, (unsigned long)vma->e->pgoff);
+	*/
+
 	*tgt_addr += size;
 	return 0;
 }
+
 
 static int premap_priv_vmas(struct vm_area_list *vmas, void *at)
 {
@@ -487,9 +506,15 @@ static int restore_priv_vma_content(void)
 					continue;
 				}
 
+				/*
+				pr_info("in page read section (memcpy), for page %lx %lx %lx %lx %lx %lx %lx\n",
+				        vma->premmaped_addr, vma->e->start, vma->e->end, (unsigned long)vma->e->prot, (unsigned long)vma->e->flags, (unsigned long)vma->e->fd, (unsigned long)vma->e->pgoff);
+				*/
+
 				nr_restored++;
 				memcpy(p, buf, PAGE_SIZE);
 			} else {
+
 				int nr;
 
 				/*
@@ -503,9 +528,23 @@ static int restore_priv_vma_content(void)
 
 				nr = min_t(int, nr_pages - i, (vma->e->end - va) / PAGE_SIZE);
 
-				ret = pr.read_pages(&pr, va, nr, p);
-				if (ret < 0)
+
+
+
+				pr_info("(%d) in page read section for page %lx-%lx (%d) %lx %lx %lx %lx %lx %lx\n", vma->step_on_my_face,
+				        vma->premmaped_addr, vma->premmaped_addr + (vma->e->end - vma->e->start), (int)((vma->e->end - vma->e->start) / PAGE_SIZE),
+				        vma->e->start, vma->e->end, (unsigned long)vma->e->prot,
+				        (unsigned long)vma->e->flags, (unsigned long)vma->e->fd, (unsigned long)vma->e->pgoff);
+
+				if (vma->step_on_my_face) {
+					ret = mmap_pagemap_pages(&pr, va, nr, p, vma);
+				} else {
+					ret = pr.read_pages(&pr, va, nr, p);
+				}
+				if (ret < 0) {
+					pr_perror("Got error reading\n");
 					goto err_read;
+				}
 
 				va += nr * PAGE_SIZE;
 				nr_restored += nr;
@@ -2709,8 +2748,84 @@ out:
 	return ret;
 }
 
+struct pmap_entry {
+	unsigned long start;
+	unsigned long end;
+	struct pmap_entry *next;
+};
+
+static struct pmap_entry * write_pmap(const char * header, int do_list) {
+	// whatever, not trying to be pretty, multi-mode super bad crap function
+
+	struct pmap_entry *head, *cur, *tmp;
+	pid_t pid = getpid();
+	char buf[1024];
+	int ret = snprintf(buf, 32, "/proc/%d/maps", pid);
+	cur = tmp = head = NULL;
+	if (ret < 0 || ret >=32) {
+		perror("I can't make pmap string");
+		exit(EXIT_FAILURE);
+	}
+	FILE *pout = fopen(buf, "r");
+	if (!pout) {
+		perror("unable to open");
+		exit(EXIT_FAILURE);
+	}
+
+	FILE *pmap_out;
+	if (header) {
+		snprintf(buf, 1024, "/tmp/pmap.%d.out", pid);
+		FILE *pmap_out = fopen(buf, "a+");
+		if (!pmap_out) {
+			perror("Unable to open pmap out file");
+			exit(EXIT_FAILURE);
+		}
+		fwrite(header, 1, strlen(header), pmap_out);
+	}
+
+  
+	while(!feof(pout)) {
+		char line[128];
+		if (fgets(line, 128, pout)) {
+			if (do_list) {
+				char *end;
+				tmp = malloc(sizeof(*cur));
+				tmp->start = strtoul(line, &end, 16);
+				tmp->end = strtoul(end+1, NULL, 16);
+				tmp->next = NULL;
+				if (cur) {
+					cur->next = tmp;
+				} else {
+					head = tmp;
+				}
+				cur = tmp;
+			}
+			if(header) {
+				fputs(line, pmap_out);
+			}
+		} else {
+			break;
+		}
+	}
+	if (header) {
+		fclose(pmap_out);
+	}
+	fclose(pout);
+
+	return head;
+}
+
+
+
+
 extern void __gcov_flush(void) __attribute__((weak));
 void __gcov_flush(void) {}
+
+struct vma_list {
+	struct vma_area vma;
+	VmaEntry ent;
+	struct vma_list *next;
+};
 
 static int sigreturn_restore(pid_t pid, CoreEntry *core)
 {
@@ -2752,6 +2867,8 @@ static int sigreturn_restore(pid_t pid, CoreEntry *core)
 
 	CredsEntry *creds;
 
+	VmaEntry *vma_entry;
+
 	pr_info("Restore via sigreturn\n");
 
 	/* pr_info_vma_list(&self_vma_list); */
@@ -2768,19 +2885,180 @@ static int sigreturn_restore(pid_t pid, CoreEntry *core)
 	 * walk them and m(un|re)map.
 	 */
 
+	struct pmap_entry *head = write_pmap(NULL, 1);
+	unsigned int map_cnt = 0;
+
+
 	tgt_vmas = rst_mem_cpos(RM_PRIVATE);
 	list_for_each_entry(vma, &vmas->h, list) {
 		VmaEntry *vme;
 
-		vme = rst_mem_alloc(sizeof(*vme), RM_PRIVATE);
-		if (!vme)
-			goto err_nv;
+		/* split vma if necessary, don't know why this happens. TODO:
+		 * Find actual source of bug */
+		if (1 && vma_area_is_private(vma, kdat.task_size)) { // doing split stupidity
+			struct vma_list *vmal = malloc(sizeof(*vmal));
+			vmal->vma = *vma;
+			vmal->ent = *vma->e;
+			vmal->vma.e = &vmal->ent;
+			vmal->next = NULL; /* this is the list of things we want to cut up */
 
-		*vme = *vma->e;
 
-		if (vma_area_is_private(vma, kdat.task_size))
-			vma_premmaped_start(vme) = vma->premmaped_addr;
+			while(vmal) {
+
+				struct vma_area *lvma = &vmal->vma;
+
+				//pr_info("attempting to print all 0x%016"PRIx64" 0x016%"PRIx64" 0x016%"PRIx64"\n", lvma->premmaped_addr, lvma->e->start, lvma->e->end);
+
+				uint64_t len = vma_area_len(lvma);
+				// find mapping in pmap entry list
+				struct pmap_entry *cur;
+				for(cur = head; cur; cur = cur->next) {
+
+					/* vma may exactly match a pmap, a subset at the beginning, a subset at the end, a subset in the middle */
+
+
+					/*
+					pr_info("Trying to match VMA 0x%016"PRIx64"-0x%016"PRIx64" to cur 0x%016"PRIx64"-0x%016"PRIx64"\n",
+					        lvma->premmaped_addr, lvma->premmaped_addr + len,
+					        cur->start, cur->end);
+					*/
+					
+
+					if ((lvma->premmaped_addr > cur->start && lvma->premmaped_addr + len < cur->end) || /* in the middle of an area, that's okay to move I think */
+						(lvma->premmaped_addr == cur->start && (cur->end - cur->start) == len)) { /* fits entire pmap, no split */
+						/*
+						|----------------------| CUR   or |-----------------------| CUR
+						|----------------------| VMA             |--------|         VMA
+						*/
+						/* can allocate it */
+
+						++map_cnt;
+						vme = rst_mem_alloc(sizeof(*vme), RM_PRIVATE);
+						if (!vme)
+							goto err_nv;
+						
+						*vme = *lvma->e;
+						vma_premmaped_start(vme) = lvma->premmaped_addr;
+
+						struct vma_list *tmp = vmal;
+						vmal = vmal->next;
+						free(tmp);
+
+						pr_info("Doing allocation for 0x%016"PRIx64"-0x%016"PRIx64"\n",
+						        lvma->premmaped_addr, lvma->premmaped_addr + len);
+						break;
+					} else if (cur->start > lvma->premmaped_addr && (lvma->premmaped_addr + len == cur->end)) { /* is at the end */
+						/*
+						      |----------------| CUR
+						|----------------------| VMA   ==> |----| && |---------------|
+						*/
+						struct vma_list *start = malloc(sizeof(*start));
+						if (!start) {
+							pr_info("can't malloc start?\n");
+						}
+						(start->vma) = *lvma;
+						start->ent = *lvma->e;
+						start->vma.e = &start->ent;
+
+						start->next = vmal;
+						start->vma.e->end = start->vma.e->start + (cur->start - lvma->premmaped_addr);
+
+						struct vma_list *end = vmal; /* alread in the list */
+						end->vma.premmaped_addr = start->vma.premmaped_addr + (start->vma.e->end - start->vma.e->start);
+						end->vma.e->start += (start->vma.e->end - start->vma.e->start);
+
+						start->next = end;
+						vmal = start;
+
+						pr_info("split entry A 0x%016"PRIx64"-0x%016"PRIx64" to 0x%016"PRIx64"-0x%016"PRIx64" and 0x%016"PRIx64"-0x%016"PRIx64" \n",
+						        lvma->premmaped_addr, lvma->premmaped_addr + len,
+						        start->vma.premmaped_addr, start->vma.premmaped_addr + (start->vma.e->end - start->vma.e->start),
+						        end->vma.premmaped_addr, end->vma.premmaped_addr + (end->vma.e->end - end->vma.e->start));
+
+						break;
+
+					} else if (lvma->premmaped_addr == cur->start && (cur->end - cur->start) < len) { /* at the beginning */
+						/*
+						|--------------| CUR
+						|----------------------| VMA  => |-------------| && |----|
+						*/
+						struct vma_list *start = vmal;
+						struct vma_list *end = malloc(sizeof(*end));
+						if (!end) {
+							pr_info("can't malloc end?\n");
+						}
+
+
+						end->vma = *lvma;
+						end->ent = *lvma->e;
+						end->vma.e = &end->ent;
+
+						start->vma.e->end = start->vma.e->start + (cur->end - cur->start);
+
+						end->vma.premmaped_addr = start->vma.premmaped_addr + (start->vma.e->end - start->vma.e->start);
+						end->vma.e->start = start->vma.e->end;
+
+
+						end->next = start;
+						vmal = end;
+
+						pr_info("split entry B 0x%016"PRIx64"-0x%016"PRIx64" to 0x%016"PRIx64"-0x%016"PRIx64" and 0x%016"PRIx64"-0x%016"PRIx64" \n",
+						        lvma->premmaped_addr, lvma->premmaped_addr + len,
+						        start->vma.premmaped_addr, start->vma.premmaped_addr + (start->vma.e->end - start->vma.e->start),
+						        end->vma.premmaped_addr, end->vma.premmaped_addr + (end->vma.e->end - end->vma.e->start));
+						
+						break;						
+					} 
+						
+				}
+
+				if (cur == NULL)  { /* region does not correspond to a pmap  */
+
+					pr_info("Did not find entry 0x%016"PRIx64"-0x%016"PRIx64" len %lx\n",
+					        lvma->premmaped_addr,
+					        lvma->premmaped_addr + vma_entry_len(lvma->e), len);
+
+					++map_cnt;
+					vme = rst_mem_alloc(sizeof(*vme), RM_PRIVATE);
+					if (!vme) {
+						pr_info("I'm melting\n");
+						goto err_nv;
+					}
+
+					*vme = *lvma->e;
+
+					if (vma_area_is_private(lvma, kdat.task_size))
+						vma_premmaped_start(vme) = lvma->premmaped_addr;
+
+					struct vma_list *tmp = vmal;
+					vmal = vmal->next;
+					free(tmp);
+				}
+
+
+			}
+		} else { /* not private */
+			++map_cnt;
+			vme = rst_mem_alloc(sizeof(*vme), RM_PRIVATE);
+			if (!vme)
+				goto err_nv;
+
+			*vme = *vma->e;
+
+			if (vma_area_is_private(vma, kdat.task_size))
+				vma_premmaped_start(vme) = vma->premmaped_addr;
+
+		}
 	}
+
+	struct pmap_entry *tmp;
+	struct pmap_entry *cur;
+	for(cur = head; cur;) {
+		tmp = cur->next;
+		free(cur);
+		cur = tmp;
+	}
+
 
 	/*
 	 * Put info about AIO rings, they will get remapped
@@ -2969,7 +3247,8 @@ static int sigreturn_restore(pid_t pid, CoreEntry *core)
 		task_args->name = rst_mem_remap_ptr(cpos, RM_PRIVATE);	\
 	} while (0)
 
-	remap_array(vmas,	  vmas->nr, tgt_vmas);
+	//remap_array(vmas,	  vmas->nr, tgt_vmas);
+	remap_array(vmas,	  map_cnt, tgt_vmas);
 	remap_array(posix_timers, posix_timers_nr, posix_timers_cpos);
 	remap_array(timerfd,	  rst_timerfd_nr, rst_timerfd_cpos);
 	remap_array(siginfo,	  siginfo_nr, siginfo_cpos);
@@ -3132,6 +3411,30 @@ static int sigreturn_restore(pid_t pid, CoreEntry *core)
 	 * An indirect call to task_restore, note it never returns
 	 * and restoring core is extremely destructive.
 	 */
+
+	if (0) {
+		pr_info("Writing out pmap for for %d\n", getpid());
+		write_pmap("hello my honey\n", 0);
+		for(i = 0; i < task_args->vmas_n; ++i) {
+			vma_entry = task_args->vmas + i;
+
+			if (!vma_entry_is_private(vma_entry, task_args->task_size))
+				continue;
+
+			if (vma_entry->end >= task_args->task_size)
+				continue;
+
+			if (vma_entry->start > vma_entry->shmid)
+				break;
+
+			pr_info("area for %d is 0x%016"PRIx64"-0x%016"PRIx64" len %lx to 0x%016"PRIx64"\n", getpid(),
+			        vma_premmaped_start(vma_entry),
+			        vma_premmaped_start(vma_entry) + vma_entry_len(vma_entry), vma_entry_len(vma_entry),
+			        vma_entry->start);
+
+		}
+	}
+
 
 	JUMP_TO_RESTORER_BLOB(new_sp, restore_task_exec_start, task_args);
 

@@ -94,6 +94,7 @@ struct cr_fd_desc_tmpl imgset_template[CR_FD_MAX] = {
 	FD_ENTRY(CPUINFO,	"cpuinfo"),
 	FD_ENTRY(SECCOMP,	"seccomp"),
 	FD_ENTRY(USERNS,	"userns-%d"),
+	FD_ENTRY_F(FUSE_MNT_INFO, "fuse", O_NOBUF),
 
 	[CR_FD_STATS] = {
 		.fmt	= "stats-%s",

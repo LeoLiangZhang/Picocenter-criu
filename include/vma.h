@@ -27,6 +27,13 @@ static inline void vm_area_list_init(struct vm_area_list *vml)
 
 struct file_desc;
 
+#ifdef DO_REGIONS
+struct entry_node { /* each of our vmas can in turn be broken into more vmas by us */
+	VmaEntry e;
+	struct list_head list;
+};
+#endif
+
 struct vma_area {
 	struct list_head	list;
 	VmaEntry		*e;
@@ -65,6 +72,10 @@ struct vma_area {
 			unsigned long	*page_bitmap;	/* existent pages */
 			unsigned long	*ppage_bitmap;	/* parent's existent pages */
 			unsigned long	premmaped_addr;	/* restore only */
+			unsigned int step_on_my_face;
+#ifdef DO_REGIONS
+			struct entry_node entries;
+#endif
 		};
 	};
 };

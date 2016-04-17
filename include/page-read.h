@@ -87,4 +87,7 @@ extern int seek_pagemap_page(struct page_read *pr, unsigned long vaddr, bool war
 
 extern int dedup_one_iovec(struct page_read *pr, struct iovec *iov);
 extern int punch_hole(struct page_read *pr, unsigned long off, unsigned long len, bool cleanup);
+
+struct vma_area;
+extern int mmap_pagemap_pages(struct page_read *pr, unsigned long vaddr, int nr, void *buf, struct vma_area *vma);
 #endif /* __CR_PAGE_READ_H__ */

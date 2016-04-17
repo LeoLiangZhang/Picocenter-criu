@@ -558,6 +558,7 @@ static void rst_tcp_socks_all(struct task_restore_args *ta)
 static int vma_remap(unsigned long src, unsigned long dst, unsigned long len)
 {
 	unsigned long guard = 0, tmp;
+	int i;
 
 	pr_info("Remap %lx->%lx len %lx\n", src, dst, len);
 
@@ -570,6 +571,7 @@ static int vma_remap(unsigned long src, unsigned long dst, unsigned long len)
 		return 0;
 
 	if (guard != 0) {
+		pr_info("...Doing guard page\n");
 		/*
 		 * mremap() returns an error if a target and source vma-s are
 		 * overlapped. In this case the source vma are remapped in
@@ -612,20 +614,39 @@ static int vma_remap(unsigned long src, unsigned long dst, unsigned long len)
 			return -1;
 		}
 
-		tmp = sys_mremap(src, len, len,
-					MREMAP_MAYMOVE | MREMAP_FIXED, addr);
-		if (tmp != addr) {
-			pr_err("Unable to remap %lx -> %lx (%lx)\n", src, addr, tmp);
-			return -1;
+		for(i = len / PAGE_SIZE; i; --i) {
+			int k = i - 1;
+			tmp = sys_mremap(src + PAGE_SIZE*k, PAGE_SIZE, PAGE_SIZE,
+			                 MREMAP_MAYMOVE | MREMAP_FIXED, addr + PAGE_SIZE*k);
+			if (tmp != addr + PAGE_SIZE*k) {
+				pr_err("A Unable to remap %lx -> %lx (%lx)\n", src, addr, tmp);
+				return -1;
+			}
 		}
 
 		src = addr;
 	}
 
-	tmp = sys_mremap(src, len, len, MREMAP_MAYMOVE | MREMAP_FIXED, dst);
-	if (tmp != dst) {
-		pr_err("Unable to remap %lx -> %lx\n", src, dst);
-		return -1;
+	if (0) {
+
+		for(i = len / PAGE_SIZE; i; --i) {
+			int k = i - 1;
+			tmp = sys_mremap(src + PAGE_SIZE*k, PAGE_SIZE, PAGE_SIZE, MREMAP_MAYMOVE | MREMAP_FIXED, dst + PAGE_SIZE*k);
+			if (tmp != dst + PAGE_SIZE*k) {
+				pr_err("B Unable to remap %lx -> %lx (%lx)\n", src, dst, len);
+				return -1;
+			}
+		}
+	} else {
+
+		
+		tmp = sys_mremap(src, len, len, MREMAP_MAYMOVE | MREMAP_FIXED, dst);
+		if (tmp != dst) {
+			pr_err("B Unable to remap %lx -> %lx (%lx) got %lx\n", src, dst, len, tmp);
+			return -1;
+		}
+
+
 	}
 
 	return 0;

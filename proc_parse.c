@@ -1128,7 +1128,6 @@ static int parse_mountinfo_ent(char *str, struct mount_info *new, char **fsname)
 		*sub = 0;
 
 	new->fstype = find_fstype_by_name(*fsname);
-
 	new->options = xmalloc(strlen(opt) + 1);
 	if (!new->options)
 		goto err;
@@ -1181,6 +1180,7 @@ struct mount_info *parse_mountinfo(pid_t pid, struct ns_id *nsid, bool for_dump)
 	struct mount_info *list = NULL;
 	FILE *f;
 	char str[1024];
+	struct mount_info *next;
 
 	f = fopen_proc(pid, "mountinfo");
 	if (!f) {
@@ -1198,6 +1198,32 @@ struct mount_info *parse_mountinfo(pid_t pid, struct ns_id *nsid, bool for_dump)
 			goto end;
 
 		new->nsid = nsid;
+
+#if 0
+		pr_debug("Parsing entry %s", str);
+		char *hack = strstr(str, " / /checkpoints");
+		if (hack != NULL && strstr(hack, "master") != NULL) {
+			/* master level 1 */
+			strcpy(hack - 4, "8:1 /checkpoints /checkpoints  rw,relatime master:1 - ext4 /dev/disk/by-uuid/be98f918-1f97-4273-9ded-f153ede18cca rw,errors=remount-ro,data=ordered\n");
+
+		} else if (hack && strstr(hack, "shared") != NULL) {
+			strcpy(hack - 4, "8:1 /checkpoints /usr/local/var/lib/lxc/alpine_lit/rootfs/checkpoints rw,relatime shared:1 - ext4 /dev/disk/by-uuid/be98f918-1f97-4273-9ded-f153ede18cca rw,errors=remount-ro,data=ordered");
+		}
+
+		if (hack) {
+			pr_debug("Changed entry to %s", str);
+		}
+#endif
+
+/*
+  With a bind mount:
+  (00.002367) Parsing entry 153 102 8:1 /checkpoints /checkpoints rw,relatime master:1 - ext4 /dev/disk/by-uuid/be98f918-1f97-4273-9ded-f153ede18cca rw,errors=remount-ro,data=ordered
+  (00.003172) Parsing entry 96 71 8:1 /checkpoints /usr/local/var/lib/lxc/alpine_lit/rootfs/checkpoints rw,relatime shared:1 - ext4 /dev/disk/by-uuid/be98f918-1f97-4273-9ded-f153ede18cca rw,errors=remount-ro,data=ordered
+
+  With a fuse mount:
+  (00.030791) Parsing entry 156 104 0:45 / /checkpoints rw,nosuid,nodev,relatime master:79 - fuse.bindfs bindfs rw,user_id=0,group_id=0,default_permissions,allow_other
+  (00.071915) Parsing entry 96 22 0:45 / /checkpoints rw,nosuid,nodev,relatime shared:79 - fuse.bindfs bindfs rw,user_id=0,group_id=0,default_permissions,allow_other
+*/
 
 		ret = parse_mountinfo_ent(str, new, &fsname);
 		if (ret < 0) {
@@ -1218,19 +1244,19 @@ struct mount_info *parse_mountinfo(pid_t pid, struct ns_id *nsid, bool for_dump)
 		}
 
 		pr_info("\ttype %s source %s mnt_id %d s_dev %#x %s @ %s flags %#x options %s\n",
-				fsname, new->source,
-				new->mnt_id, new->s_dev, new->root, new->mountpoint,
-				new->flags, new->options);
+		        fsname, new->source,
+		        new->mnt_id, new->s_dev, new->root, new->mountpoint,
+		        new->flags, new->options);
 
 		if (new->fstype->parse) {
 			ret = new->fstype->parse(new);
 			if (ret) {
 				pr_err("Failed to parse FS specific data on %s\n",
-						new->mountpoint);
+				       new->mountpoint);
 				goto end;
 			}
 		}
-end:
+	  end:
 		if (fsname)
 			free(fsname);
 
@@ -1242,11 +1268,20 @@ end:
 		if (ret)
 			goto err;
 	}
-out:
+  out:
 	fclose(f);
+	for(next=list;next;next=next->next) {
+		pr_debug("Checking mount info list. %d %d %s %s (%s)\n", next->mnt_id, next->parent_mnt_id, next->root, next->mountpoint, next->ns_mountpoint);
+		if (strcmp(next->mountpoint, "./checkpoints") == 0 && next->mnt_id > g_checkpoint_mnt_id) {
+			g_checkpoint_mnt_id = next->mnt_id;
+			pr_debug("setting checkpoing mnt id to %d\n", g_checkpoint_mnt_id);
+			break;
+		}
+	}
+		         
 	return list;
 
-err:
+  err:
 	while (list) {
 		struct mount_info *next = list->next;
 		mnt_entry_free(list);

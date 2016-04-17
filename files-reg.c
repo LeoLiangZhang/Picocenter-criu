@@ -918,9 +918,24 @@ static int check_path_remap(struct fd_link *link, const struct fd_parms *parms,
 	mntns_root = mntns_get_root_fd(nsid);
 	if (mntns_root < 0)
 		return -1;
-
+	
 	ret = fstatat(mntns_root, rpath, &pst, 0);
+	if (ret < 0 && strstr(rpath, "img")) {
+		char fullpath[256] = "/checkpoints";
+		strcat(fullpath, rpath + 1);
+		ret = fstatat(mntns_root, fullpath, &pst, 0);
+		pr_debug("Now trying with %s, got %d\n", fullpath, ret);
+	}
 	if (ret < 0) {
+		char out[128];
+		char path[256];
+		sprintf(out, "/proc/self/fd/%d", mntns_root);
+		if (readlink(out, path, 256) < 0) {
+			pr_perror("Could not readlink:");
+		}
+
+		pr_debug("Looked for file %s at %s but did not find it\n",  path, rpath);
+
 		/*
 		 * Linked file, but path is not accessible (unless any
 		 * other error occurred). We can create a temporary link to it
@@ -930,7 +945,7 @@ static int check_path_remap(struct fd_link *link, const struct fd_parms *parms,
 
 		if (errno == ENOENT)
 			return dump_linked_remap(rpath + 1, plen - 1,
-							ost, lfd, id, nsid);
+			                         ost, lfd, id, nsid);
 
 		pr_perror("Can't stat path");
 		return -1;
@@ -990,6 +1005,12 @@ int dump_one_reg_file(int lfd, u32 id, const struct fd_parms *p)
 		link = p->link;
 
 	nsid = lookup_nsid_by_mnt_id(p->mnt_id);
+	if (nsid == NULL) {
+		/* and showers were had by all */
+		pr_debug("Could not find nsid for %d. Probably looking for a host mnt_id. Trying %d\n", p->mnt_id, g_checkpoint_mnt_id);
+		nsid = lookup_nsid_by_mnt_id(g_checkpoint_mnt_id);
+	}
+
 	if (nsid == NULL) {
 		pr_err("Can't lookup mount=%d for fd=%d path=%s\n",
 			p->mnt_id, p->fd, link->name + 1);
@@ -1269,6 +1290,12 @@ int do_open_reg_noseek_flags(int ns_root_fd, struct reg_file_info *rfi, void *ar
 	int fd;
 
 	fd = openat(ns_root_fd, rfi->path, flags);
+	if (fd < 0 && strstr(rfi->path, "img")) {
+		char path[256] = "/checkpoints/";
+		strcat(path, rfi->path);
+		fd = open(path, flags);
+		pr_debug("Trying again on path %s\n", path);
+	}
 	if (fd < 0) {
 		pr_perror("Can't open file %s on restore", rfi->path);
 		return fd;

@@ -6,6 +6,8 @@
 #include "asm/types.h"
 #include "list.h"
 
+extern int g_checkpoint_mnt_id;
+
 struct proc_mountinfo;
 struct pstree_item;
 struct fstype;

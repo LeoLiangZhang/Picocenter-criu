@@ -101,7 +101,10 @@ enum {
 	CR_FD_FANOTIFY_MARK,
 	CR_FD_EVENTPOLL_TFD,
 
-	CR_FD_MAX
+	CR_FD_FUSE_MNT_INFO,
+
+	CR_FD_MAX,
+
 };
 
 /* file descriptors template */

@@ -732,6 +732,10 @@ struct vma_area *alloc_vma_area(void)
 		p->e->fd = -1;
 	}
 
+#ifdef DO_REGIONS
+	INIT_LIST_HEAD(&p->entries.list);
+#endif
+
 	return p;
 }
 

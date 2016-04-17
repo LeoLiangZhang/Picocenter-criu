@@ -32,6 +32,7 @@
  * of various Russian towns in the NNNNEEEE form.
  */
 
+#define FUSE_MNT_INFO_MAGIC 0x38597657 /* College Park, MD */
 #define INVENTORY_MAGIC		0x58313116 /* Veliky Novgorod */
 #define PSTREE_MAGIC		0x50273030 /* Kyiv */
 #define FDINFO_MAGIC		0x56213732 /* Dmitrov */

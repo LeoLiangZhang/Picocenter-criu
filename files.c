@@ -208,6 +208,15 @@ static int fixup_overlayfs(struct fd_parms *p, struct fd_link *link)
 }
 
 /*
+static int fixup_mmapped(struct fd_params *P, struct fd_link *link) {
+	struct mount_info *m;
+
+	if (!link)
+		return 0;
+}
+*/
+
+/*
  * The gen_id thing is used to optimize the comparison of shared files.
  * If two files have different gen_ids, then they are different for sure.
  * If it matches, we don't know it and have to call sys_kcmp().

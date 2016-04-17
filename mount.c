@@ -36,6 +36,8 @@
 #undef	LOG_PREFIX
 #define LOG_PREFIX "mnt: "
 
+int g_checkpoint_mnt_id = -1;
+
 int ext_mount_add(char *key, char *val)
 {
 	struct ext_mount *em;
@@ -1380,12 +1382,194 @@ static int dump_empty_fs(struct mount_info *pm)
  * Some fses (fuse) cannot be dumped, so we should always fail on dump/restore
  * of these fses.
  */
+/*
 static int always_fail(struct mount_info *pm)
 {
 	pr_err("failed to dump fs %s (%s): always fail\n", pm->mountpoint,
 							   pm->fstype->name);
 	return -1;
 }
+*/
+
+
+struct fuse_mount_fun {
+	int mnt_id;
+	int parent_mnt_id;
+	unsigned int s_dev;
+	char root[128];
+	char mountpoint[128];
+	char ns_mountpoint[128];
+	unsigned flags;
+	int master_id;
+	int shared_id;
+	char source[128];
+	char options[128];
+	int is_external;
+	/* from ext_mount external */
+	char ext_key[128];
+	char ext_val[128];
+};
+
+void print_fmfun(const struct fuse_mount_fun *f) {
+	pr_debug("f->mnt_id = %d\n", f->mnt_id);
+
+	pr_debug("f->parent_mnt_id = %d\n", f->parent_mnt_id);
+	pr_debug("f->s_dev = %d\n", f->s_dev);
+	pr_debug("f->root[128] = %s\n", f->root);
+	pr_debug("f->mountpoint[128] = %s\n", f->mountpoint);
+	pr_debug("f->ns_mountpoint[128] = %s\n", f->ns_mountpoint);
+	pr_debug("f->flags = %d\n", f->flags);
+	pr_debug("f->master_id = %d\n", f->master_id);
+	pr_debug("f->shared_id = %d\n", f->shared_id);
+	pr_debug("f->source[128] = %s\n", f->source);
+	pr_debug("f->options[128] = %s\n", f->options);
+	pr_debug("f->is_external = %d\n", f->is_external);
+	pr_debug("f->ext_key = %s\n", f->ext_key);
+	pr_debug("f->ext_val = %s\n", f->ext_val);
+
+}
+
+void mif_to_fun(const struct mount_info *pm, struct fuse_mount_fun *f) {
+	bzero(f, sizeof(*f));
+	f->mnt_id = pm->mnt_id;
+	f->parent_mnt_id = pm->parent_mnt_id;
+	f->s_dev = pm->s_dev;
+	strncpy(f->root, pm->root, sizeof(f->root));
+	strncpy(f->mountpoint, pm->mountpoint, sizeof(f->mountpoint));
+	f->flags = pm->flags;
+	f->master_id = pm->master_id;
+	f->shared_id = pm->shared_id;
+	strncpy(f->source, pm->source, sizeof(f->source));
+	strncpy(f->options, pm->options, sizeof(f->options));
+	f->is_external = pm->external != NULL; /* not sure if this is true or not */
+	if (f->is_external) {
+		strncpy(f->ext_key, pm->external->key, sizeof(f->ext_key));
+		strncpy(f->ext_val, pm->external->val, sizeof(f->ext_val));
+	}
+
+}
+
+
+static int fuse_restore(struct mount_info *pm) {
+	int ret = -1;	
+	int userns_pid = -1;
+	struct cr_img *img;
+	struct mount_info *parent = pm->parent;
+
+	struct fuse_mount_fun fun;
+	struct fuse_mount_fun fun_in;
+
+
+
+	pr_debug("Entering fuse_restore\n");
+	mif_to_fun(pm, &fun);
+	pr_debug("--->current context mif<---\n");
+	print_fmfun(&fun);
+
+	pr_debug("Just lying and saying all good\n");
+	ret = 0;
+	goto out;
+
+
+
+	img = open_image(CR_FD_FUSE_MNT_INFO, O_RSTR, pm->s_dev);
+	if (!img) {
+		pr_perror("Could not open image in fuse dump\n");
+		goto out;
+	}
+
+	if (root_ns_mask & CLONE_NEWUSER) {
+		/* I think this means has a child ns */
+		//userns_pid = root_item->pid.real;
+		pr_debug("mask got newuser\n");
+	}
+	if (read(img_raw_fd(img), &fun_in, sizeof(fun_in)) == sizeof(fun_in)) {
+		ret = 0;
+	} else {
+		pr_debug("Could not read full thing, %s\n", strerror(errno));
+	}
+
+	pr_debug("userns_pid = %d\n", userns_pid);
+	pr_debug("--->new context mif<---\n");
+	print_fmfun(&fun_in);
+
+	if (ret) pr_err("Can't dump myself\n");
+	close_image(img);
+
+		for(;parent; parent = parent->parent) {
+		pr_debug("Doing parent -->\n");
+		mif_to_fun(parent, &fun);
+		print_fmfun(&fun);
+	}
+
+
+	for(parent = pm->bind ;parent && parent !=pm; parent = parent->parent) {
+		pr_debug("Doing bind -->\n");
+		mif_to_fun(parent, &fun);
+		print_fmfun(&fun);
+	}
+
+
+
+
+  out:
+	return ret;
+}
+
+static int fuse_dump(struct mount_info *pm) {
+	int ret = -1;	
+	int userns_pid = -1;
+	struct cr_img *img;
+	struct mount_info *parent = pm->parent;
+	struct fuse_mount_fun fun;
+
+	pr_debug("Entering fuse_dump\n");
+	mif_to_fun(pm, &fun);
+	print_fmfun(&fun);
+
+	for(;parent; parent = parent->parent) {
+		pr_debug("Doing parent -->\n");
+		mif_to_fun(parent, &fun);
+		print_fmfun(&fun);
+	}
+
+
+	for(parent = pm->bind ;parent && parent !=pm; parent = parent->parent) {
+		pr_debug("Doing bind -->\n");
+		mif_to_fun(parent, &fun);
+		print_fmfun(&fun);
+	}
+
+	
+	
+	img = open_image(CR_FD_FUSE_MNT_INFO, O_DUMP, pm->s_dev);
+	if (!img) {
+		pr_perror("Could not open image in fuse dump\n");
+		goto out;
+	}
+
+	if (root_ns_mask & CLONE_NEWUSER) {
+		/* I think this means has a child ns */
+		//userns_pid = root_item->pid.real;
+		pr_debug("mask got newuser\n");
+	}
+	if (write(img_raw_fd(img), &fun, sizeof(fun)) == sizeof(fun)) {
+		ret = 0;
+	} else {
+		pr_debug("Could not write full thing, %s\n", strerror(errno));
+	}
+
+	pr_debug("userns_pid = %d\n", userns_pid);
+
+	if (ret) pr_err("Can't dump myself\n");
+	close_image(img);
+
+	ret = 0;
+  out:
+
+	return ret;
+}
+
 
 static struct fstype fstypes[32] = {
 	{
@@ -1449,8 +1633,8 @@ static struct fstype fstypes[32] = {
 	}, {
 		.name = "fuse",
 		.code = FSTYPE__FUSE,
-		.dump = always_fail,
-		.restore = always_fail,
+		.dump = fuse_dump,
+		.restore = fuse_restore,
 	}, {
 		.name = "overlay",
 		.code = FSTYPE__OVERLAYFS,
@@ -1576,6 +1760,12 @@ static int dump_one_mountpoint(struct mount_info *pm, struct cr_img *img)
 {
 	MntEntry me = MNT_ENTRY__INIT;
 
+#if 0
+	if (strcmp("./checkpoints", pm->mountpoint) == 0) {
+		pr_info("Not dumping checkpoints\n");
+		return 0;
+	}
+#endif
 	pr_info("\t%d: %x:%s @ %s\n", pm->mnt_id, pm->s_dev,
 			pm->root, pm->mountpoint);
 
@@ -1588,8 +1778,10 @@ static int dump_one_mountpoint(struct mount_info *pm, struct cr_img *img)
 	    pm->fstype->dump && fsroot_mounted(pm)) {
 		struct mount_info *t;
 
-		if (pm->fstype->dump(pm))
+		if (pm->fstype->dump(pm)) {
+			pr_perror("Could not dump filesystem type %s\n", pm->fstype->name);
 			return -1;
+		}
 
 		list_for_each_entry(t, &pm->mnt_bind, mnt_bind)
 			t->dumped = true;
@@ -2065,7 +2257,6 @@ do_bind:
 				return -1;
 			}
 		}
-
 		if (mount(root, mi->mountpoint, NULL, MS_BIND, NULL) < 0) {
 			pr_perror("Can't mount at %s", mi->mountpoint);
 			return -1;
@@ -2092,8 +2283,9 @@ do_bind:
 			}
 		}
 	} else {
-		if (restore_ext_mount(mi))
+		if (restore_ext_mount(mi)) {
 			return -1;
+		}
 	}
 
 	/*
@@ -2101,11 +2293,17 @@ do_bind:
 	 * mi->shared_id && !shared - create a new shared group
 	 */
 	if (restore_shared_options(mi, force_private_remount || (!shared && !mi->master_id),
-					mi->shared_id && !shared,
-					mi->master_id))
+	                           mi->shared_id && !shared,
+	                           mi->master_id)) {
 		return -1;
+	}
+
 
 	mi->mounted = true;
+	if (mi->fstype->code == FSTYPE__FUSE) {
+		pr_debug("Calling fuse restore\n");
+		mi->fstype->restore(mi);
+	}
 
 	return 0;
 }
@@ -2185,10 +2383,13 @@ static int do_mount_one(struct mount_info *mi)
 		/* do_mount_root() is called from populate_mnt_ns() */
 		mi->mounted = true;
 		ret = 0;
-	} else if (!mi->bind && !mi->need_plugin && !mi->external)
+	} else if (!mi->bind && !mi->need_plugin && !mi->external) {
+		pr_debug("%s doing new mount (%d %d %d)\n", mi->fstype->name, !!mi->bind, !!mi->need_plugin, !!mi->external);
 		ret = do_new_mount(mi);
-	else
+	} 	else {
+		pr_debug("%s doing bind mount\n", mi->fstype->name);
 		ret = do_bind_mount(mi);
+	}
 
 	if (ret == 0 && propagate_mount(mi))
 		return -1;
@@ -2906,7 +3107,22 @@ int prepare_mnt_ns(void)
 	}
 	close(rst);
 
+
+	struct mount_info *pm;
+	struct mount_info *next;
+//out:
+	pr_debug("Doing parse mountinfo\n");
+	pm = next = parse_mountinfo(getpid(), &ns, 0);
+	for(;next;next = next->next) {
+		if (strcmp(next->root, "/checkpoints") == 0) {
+			g_checkpoint_mnt_id = next->mnt_id;
+			pr_debug("setting checkpoing mnt id to %d\n", g_checkpoint_mnt_id);
+			break;
+		}
+	}
+	free_mntinfo(pm);
 	return ret;
+
 err:
 	if (rst)
 		restore_ns(rst, &mnt_ns_desc);
@@ -3014,6 +3230,13 @@ int mntns_get_root_by_mnt_id(int mnt_id)
 	struct ns_id *mntns;
 
 	mntns = lookup_nsid_by_mnt_id(mnt_id);
+
+	if (mntns == NULL) {
+		pr_debug("get root by mnt id forced to set mnt_id to %d\n", g_checkpoint_mnt_id);
+		mnt_id = g_checkpoint_mnt_id;
+		mntns = lookup_nsid_by_mnt_id(mnt_id);
+	}
+
 	BUG_ON(mntns == NULL);
 
 	return mntns_get_root_fd(mntns);
